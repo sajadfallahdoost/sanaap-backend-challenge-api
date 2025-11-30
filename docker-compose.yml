@@ -1,0 +1,213 @@
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:15-alpine
+    container_name: dms_db
+    environment:
+      POSTGRES_DB: ${DB_NAME:-sanaap_db}
+      POSTGRES_USER: ${DB_USER:-sanaap_db}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-sdjnnfejsajad3574nndfkd}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-sanaap_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - dms_network
+
+  # Redis Cache & Message Broker
+  redis:
+    image: redis:7-alpine
+    container_name: dms_redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - dms_network
+
+  # MinIO Object Storage
+  minio:
+    image: minio/minio:latest
+    container_name: dms_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - dms_network
+
+  # Django Web Application (Development Mode)
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dms_web
+    entrypoint: ["/app/docker/scripts/entrypoint.sh"]
+    # Use Django runserver for development (auto-reload, better debugging)
+    command: ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.development
+      - SECRET_KEY=${SECRET_KEY:-django-insecure-dev-key-change-in-production}
+      - DEBUG=True
+      - ALLOWED_HOSTS=*
+      - DB_NAME=${DB_NAME:-sanaap_db}
+      - DB_USER=${DB_USER:-sanaap_db}
+      - DB_PASSWORD=${DB_PASSWORD:-sdjnnfejsajad3574nndfkd}
+      - DB_HOST=db
+      - DB_PORT=5432
+      - REDIS_URL=redis://redis:6379/1
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      - MINIO_SECURE=False
+      - MINIO_BUCKET_NAME=${MINIO_BUCKET_NAME:-documents}
+      - SUPERUSER_USERNAME=${SUPERUSER_USERNAME:-admin}
+      - SUPERUSER_EMAIL=${SUPERUSER_EMAIL:-admin@example.com}
+      - SUPERUSER_PASSWORD=${SUPERUSER_PASSWORD:-admin123}
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - static_volume:/app/staticfiles
+      - media_volume:/app/media
+      - ./logs:/app/logs
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/admin/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - dms_network
+
+  # Django Channels (Daphne) for WebSocket
+  channels:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dms_channels
+    command: ["daphne", "-b", "0.0.0.0", "-p", "9002", "config.asgi:application"]
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.development
+      - DEBUG=True
+      - SECRET_KEY=${SECRET_KEY:-django-insecure-change-this-in-production-123456789}
+      - DB_NAME=${DB_NAME:-sanaap_db}
+      - DB_USER=${DB_USER:-sanaap_db}
+      - DB_PASSWORD=${DB_PASSWORD:-sdjnnfejsajad3574nndfkd}
+      - DB_HOST=db
+      - DB_PORT=5432
+      - REDIS_URL=redis://redis:6379/2
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      - MINIO_SECURE=False
+      - MINIO_BUCKET_NAME=${MINIO_BUCKET_NAME:-documents}
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - dms_network
+
+  # Celery Worker
+  celery:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dms_celery
+    command: ["celery", "-A", "config", "worker", "-l", "info", "--concurrency=2"]
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.development
+      - DEBUG=True
+      - SECRET_KEY=${SECRET_KEY:-django-insecure-change-this-in-production-123456789}
+      - DB_NAME=${DB_NAME:-sanaap_db}
+      - DB_USER=${DB_USER:-sanaap_db}
+      - DB_PASSWORD=${DB_PASSWORD:-sdjnnfejsajad3574nndfkd}
+      - DB_HOST=db
+      - DB_PORT=5432
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      - MINIO_SECURE=False
+      - MINIO_BUCKET_NAME=${MINIO_BUCKET_NAME:-documents}
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - dms_network
+
+  # Celery Beat (Scheduler)
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dms_celery_beat
+    command: ["celery", "-A", "config", "beat", "-l", "info", "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler"]
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.development
+      - DEBUG=True
+      - SECRET_KEY=${SECRET_KEY:-django-insecure-change-this-in-production-123456789}
+      - DB_NAME=${DB_NAME:-sanaap_db}
+      - DB_USER=${DB_USER:-sanaap_db}
+      - DB_PASSWORD=${DB_PASSWORD:-sdjnnfejsajad3574nndfkd}
+      - DB_HOST=db
+      - DB_PORT=5432
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - dms_network
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  static_volume:
+  media_volume:
+
+networks:
+  dms_network:
+    driver: bridge
+
